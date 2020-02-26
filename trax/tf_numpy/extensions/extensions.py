@@ -25,6 +25,7 @@ import threading
 import numpy as np
 import tensorflow.compat.v2 as tf
 
+from trax.tf_numpy.numpy import arrays
 from trax.tf_numpy.numpy import random
 from trax.tf_numpy.numpy.array_creation import array
 from trax.tf_numpy.numpy.array_creation import asarray
@@ -32,12 +33,47 @@ from trax.tf_numpy.numpy.arrays import ndarray
 from trax.tf_numpy.numpy.arrays import ShardedNdArray
 
 
+_pow7 = 2 ** 7
+_pow15 = 2 ** 15
+_pow31 = 2 ** 31
+_pow63 = 2 ** 63
+
+def most_precise_int_dtype(x):
+  if not isinstance(x, int):
+    return None
+  dtype = None
+  if 0 <= x and x < _pow7:
+    dtype = tf.uint8
+  elif - _pow7 <= x and x < 0:
+    dtype = tf.int8
+  elif 0 <= x and x < _pow15:
+    dtype = tf.uint16
+  elif - _pow15 <= x and x < 0:
+    dtype = tf.int16
+  elif 0 <= x and x < _pow31:
+    dtype = tf.uint32
+  elif - _pow31 <= x and x < 0:
+    dtype = tf.int32
+  elif 0 <= x and x < _pow63:
+    dtype = tf.uint64
+  elif - _pow63 <= x and x < 0:
+    dtype = tf.int64
+  return dtype
+
+
 def _canonicalize_jit_arg(x):
   if isinstance(x, ndarray):
     return x.data
   else:
     try:
-      return tf.convert_to_tensor(value=x)
+      # We need to convert `int` to the most precise dtype, otherwise the dtype
+      # of the result may be different from numpy's. For example, when a binary
+      # op takes in a Python integer 5 and an array of uint32, numpy will pick
+      # uint32 as 5's dtype, while tf.convert_to_tensor will choose int32 which
+      # will cause the two arguments to be promoted to int64. We pick uint8
+      # here, which will be promoted to uint32 by the binary op.
+      dtype = most_precise_int_dtype(x)
+      return arrays.convert_to_tensor(value=x, dtype=dtype)
     except (TypeError, ValueError):
       return x
 
@@ -455,7 +491,7 @@ def bernoulli(key, mean=np.float32(0.5), shape=()):
     A random array with the specified shape and boolean dtype.
   """
   # TODO(wangpeng): convert types TF <-> numpy.
-  shape = shape or tf.convert_to_tensor(value=mean).shape
+  shape = shape or arrays.convert_to_tensor(value=mean).shape
   return array(
       tf.less(uniform(key, shape), mean), copy=False)
 

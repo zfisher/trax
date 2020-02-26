@@ -259,13 +259,13 @@ JAX_COMPOUND_OP_RECORDS = [
 
 JAX_BITWISE_OP_RECORDS = [
     op_record("bitwise_and", 2, int_dtypes + unsigned_dtypes, all_shapes,
-              jtu.rand_bool, []),
+              jtu.rand_default, []),
     op_record("bitwise_not", 1, int_dtypes + unsigned_dtypes, all_shapes,
-              jtu.rand_bool, []),
+              jtu.rand_default, []),
     op_record("bitwise_or", 2, int_dtypes + unsigned_dtypes, all_shapes,
-              jtu.rand_bool, []),
+              jtu.rand_default, []),
     op_record("bitwise_xor", 2, int_dtypes + unsigned_dtypes, all_shapes,
-              jtu.rand_bool, []),
+              jtu.rand_default, []),
 ]
 
 JAX_REDUCER_RECORDS = [
@@ -308,7 +308,7 @@ JAX_OPERATOR_OVERLOADS = [
     op_record("__neg__", 1, number_dtypes, all_shapes, jtu.rand_default, []),
     op_record("__pow__", 2, inexact_dtypes, all_shapes, jtu.rand_positive, [],
               tolerance={onp.float32: 2e-4, onp.complex64: 2e-4, onp.complex128: 1e-14}),
-    op_record("__mod__", 2, default_dtypes, all_shapes, jtu.rand_nonzero, [],
+    op_record("__mod__", 2, minus(default_dtypes, [onp.float16]), all_shapes, jtu.rand_nonzero, [],
               tolerance={onp.float16: 1e-1}),
     op_record("__floordiv__", 2, default_dtypes, all_shapes, jtu.rand_nonzero, []),
     op_record("__truediv__", 2, number_dtypes, all_shapes, jtu.rand_nonzero, [],
@@ -330,7 +330,7 @@ JAX_RIGHT_OPERATOR_OVERLOADS = [
     op_record("__rmul__", 2, number_dtypes, all_shapes, jtu.rand_default, []),
     op_record("__rpow__", 2, inexact_dtypes, all_shapes, jtu.rand_positive, [],
               tolerance={onp.float32: 2e-4, onp.complex64: 1e-3}),
-    op_record("__rmod__", 2, default_dtypes, all_shapes, jtu.rand_nonzero, [],
+    op_record("__rmod__", 2, minus(default_dtypes, [onp.float16]), all_shapes, jtu.rand_nonzero, [],
               tolerance={onp.float16: 1e-1}),
     op_record("__rfloordiv__", 2, default_dtypes, all_shapes, jtu.rand_nonzero, []),
     op_record("__rtruediv__", 2, number_dtypes, all_shapes, jtu.rand_nonzero, [],
@@ -371,14 +371,23 @@ def _dtypes_are_compatible_for_bitwise_ops(args):
   is_signed = lambda dtype: lnp.issubdtype(dtype, onp.signedinteger)
   width = lambda dtype: lnp.iinfo(dtype).bits
   x, y = args
+  # `lnp.iinfo(dtype).bits` can't be called on bools, so we convert bools to
+  # ints.
+  if x == lnp.bool_:
+    x = lnp.int32
+  if y == lnp.bool_:
+    y = lnp.int32
   if width(x) > width(y):
     x, y = y, x
+  if x == lnp.uint32 and y == lnp.uint64:
+    return False
   # The following condition seems a little ad hoc, but seems to capture what
   # numpy actually implements.
   return (
       is_signed(x) == is_signed(y)
       or (width(x) == 32 and width(y) == 32)
       or (width(x) == 32 and width(y) == 64 and is_signed(y)))
+
 
 def _shapes_are_broadcast_compatible(shapes):
   accumulator = onp.zeros([])
@@ -436,15 +445,7 @@ def named_parameters(ls):
   return parameterized.named_parameters(ls)
 
 
-# TODO(wangpeng): Remove these filters
-JAX_COMPOUND_OP_RECORDS = [x for x in JAX_COMPOUND_OP_RECORDS if hasattr(lnp, x.name)]
-JAX_OPERATOR_OVERLOADS = [x for x in JAX_OPERATOR_OVERLOADS if hasattr(lnp.ndarray, x.name)]
-JAX_RIGHT_OPERATOR_OVERLOADS = [x for x in JAX_RIGHT_OPERATOR_OVERLOADS if hasattr(lnp.ndarray, x.name)]
-JAX_BITWISE_OP_RECORDS = [x for x in JAX_BITWISE_OP_RECORDS if hasattr(lnp, x.name)]
-JAX_REDUCER_RECORDS = [x for x in JAX_REDUCER_RECORDS if hasattr(lnp, x.name)]
-JAX_REDUCER_NO_DTYPE_RECORDS = [x for x in JAX_REDUCER_NO_DTYPE_RECORDS if hasattr(lnp, x.name)]
-
-
+# TODO(wangpeng): Enable disabled tests
 class LaxBackedNumpyTests(jtu.JaxTestCase):
   """Tests for LAX-backed Numpy implementation."""
 
@@ -486,7 +487,16 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
 
     # Run `cfun` with a different set of arguments to check that changing
     # arguments won't cause recompilation.
+
+    old_args = args
     args = args_maker()
+
+    for old, new in zip(old_args, args):
+      if npe.most_precise_int_dtype(old) != npe.most_precise_int_dtype(new):
+        # If the old and new arguments result in different dtypes (because they
+        # fall into different value ranges), tf-numpy will retrace, so we skip
+        # the no-retrace test.
+        return
 
     python_should_be_executing = True
     python_ans = fun(*args)
@@ -538,7 +548,6 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
         for dtypes in itertools.product(
           *(_valid_dtypes_for_shape(s, rec.dtypes) for s in shapes)))
       for rec in JAX_OPERATOR_OVERLOADS))
-  # TODO(wangpeng): Enable disabled tests
   def testOperatorOverload(self, name, rng_factory, shapes, dtypes, tol):
     rng = rng_factory()
     # onp and lnp arrays have different type promotion rules; force the use of
@@ -594,15 +603,15 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
           _dtypes_are_compatible_for_bitwise_ops,
           CombosWithReplacement(rec.dtypes, rec.nargs)))
       for rec in JAX_BITWISE_OP_RECORDS))
-  @disable
   def testBitwiseOp(self, onp_op, lnp_op, rng_factory, shapes, dtypes):
     rng = rng_factory()
-    if not FLAGS.jax_enable_x64 and any(
-        lnp.iinfo(dtype).bits == 64 for dtype in dtypes):
-      self.skipTest("x64 types are disabled by jax_enable_x64")
     args_maker = self._GetArgsMaker(rng, shapes, dtypes)
     self._CheckAgainstNumpy(onp_op, lnp_op, args_maker,
                             check_dtypes=jtu.PYTHON_SCALAR_SHAPE not in shapes)
+    if onp_op == onp.bitwise_not and list(shapes) == [jtu.PYTHON_SCALAR_SHAPE]:
+      # For bitwise_not with a Python `int`, npe.jit may choose a different
+      # dtype for the `int` from onp's choice, so we skip _CompileAndCheck.
+      return
     self._CompileAndCheck(lnp_op, args_maker, check_dtypes=True)
 
   @named_parameters(itertools.chain.from_iterable(
@@ -619,7 +628,6 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
         for axis in set(range(-len(shape), len(shape))) | set([None])
         for keepdims in [False, True])
     for rec in JAX_REDUCER_RECORDS))
-  @disable
   def testReducer(self, onp_op, lnp_op, rng_factory, shape, dtype, out_dtype,
                   axis, keepdims, inexact):
     rng = rng_factory()
@@ -651,7 +659,6 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
       for shape in rec.shapes for dtype in rec.dtypes
       for axis in set(range(-len(shape), len(shape))) | set([None])
       for keepdims in [False, True]))
-  @disable
   def testReducerNoDtype(self, onp_op, lnp_op, rng_factory, shape, dtype, axis,
                          keepdims, inexact):
     rng = rng_factory()
@@ -1010,7 +1017,6 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
       for reps in [(), (2,), (3, 4), (2, 3, 4)]
       for shape, dtype in _shape_and_dtypes(all_shapes, default_dtypes)
       ))
-  @disable
   def testTile(self, shape, dtype, reps, rng_factory):
     rng = rng_factory()
     onp_fun = lambda arg: onp.tile(arg, reps)
@@ -1032,15 +1038,15 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
       for arg_dtypes in CombosWithReplacement(default_dtypes, num_arrs)
       for base_shape in [(4,), (3, 4), (2, 3, 4)]
       for axis in range(-len(base_shape)+1, len(base_shape))))
-  @disable
   def testConcatenate(self, axis, base_shape, arg_dtypes, rng_factory):
     rng = rng_factory()
     wrapped_axis = axis % len(base_shape)
     shapes = [base_shape[:wrapped_axis] + (size,) + base_shape[wrapped_axis+1:]
               for size, _ in zip(itertools.cycle([3, 1, 4]), arg_dtypes)]
     def onp_fun(*args):
-      args = [x if x.dtype != lnp.bfloat16 else x.astype(onp.float32)
-              for x in args]
+      # TODO(nareshmodi): enable once bfloat16 has better support
+      # args = [x if x.dtype != bfloat16 else x.astype(onp.float32)
+      #         for x in args]
       dtype = functools.reduce(lnp.promote_types, arg_dtypes)
       return onp.concatenate(args, axis=axis).astype(dtype)
     lnp_fun = lambda *args: lnp.concatenate(args, axis=axis)

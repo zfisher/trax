@@ -29,7 +29,11 @@ from trax.tf_numpy.numpy.array_manipulation import *
 from trax.tf_numpy.numpy.array_methods import *
 from trax.tf_numpy.numpy.arrays import ndarray
 from trax.tf_numpy.numpy.dtypes import *
-from trax.tf_numpy.numpy.logic import *
 from trax.tf_numpy.numpy.math import *
 from trax.tf_numpy.numpy.utils import finfo
+from trax.tf_numpy.numpy.utils import result_type
+from trax.tf_numpy.numpy.utils import promote_types
 # pylint: enable=wildcard-import
+
+max = amax
+min = amin
